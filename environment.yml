@@ -1,0 +1,8 @@
+name: ldap2files
+channels:
+  - conda-forge
+dependencies:
+  - click
+  - mamba
+  - python-ldap
+  - pyyaml
