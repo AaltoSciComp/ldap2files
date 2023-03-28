@@ -3,7 +3,7 @@ import re
 import logging
 import sys
 import pickle
-import io
+import sys
 from collections import defaultdict
 
 import click
@@ -124,25 +124,23 @@ class LDAPSearcher:
         group_searches = defaultdict(list)
         for group in groups:
             cn, base = self.dn_split(group, self.group_base)
-            #group_searches[base].append(f'(memberOf:1.2.840.113556.1.4.1941:={cn})')
             group_searches[base].append(f'({cn})')
-
 
         group_data = {}
         for group_base, group_list in group_searches.items():
             for group_search in self.split_list(group_list, 100):
                 if len(group_search) > 1:
-                    #ldap_filter = f'(&(objectCategory=group)(|{"".join(group_search)}))'
-                    ldap_filter = f'(|{"".join(group_search)})'
+                    ldap_filter = f'(&(objectCategory=group)(|{"".join(group_search)}))'
                 else:
-                    #ldap_filter = f'(&(objectCategory=group){group_search[0]})'
-                    ldap_filter = f'{group_search[0]}'
+                    ldap_filter = f'(&(objectCategory=group){group_search[0]})'
 
                 logging.debug('Doing a query for groups from group base "%s" with ldap filter "%s".', group_base, ldap_filter)
                 response = self.connection.search_s(group_base, ldap.SCOPE_SUBTREE, ldap_filter, self.group_attrs)
                 self.num_queries += 1
 
                 for dn, group_response in response:
+                    if not isinstance(dn, bytes):
+                        dn = bytes(dn, 'utf-8')
                     group_data[dn] = group_response
 
         if cache_file:
@@ -150,6 +148,37 @@ class LDAPSearcher:
             self.write_cache(group_data, cache_file)
 
         return group_data
+
+    def get_groups_users(self, groups, cache_file):
+        if cache_file and os.path.isfile(cache_file):
+            logging.debug('Using cached query from file: %s', cache_file)
+            user_data = self.read_cache(cache_file)
+            return user_data
+
+        attrs = self.user_attrs + ['memberOf']
+
+        user_data = {}
+        for group in groups:
+            if isinstance(group, bytes):
+                group_name = group.decode('utf-8')
+            else:
+                group_name = group
+            ldap_filter = f'(&(objectCategory=user)(memberOf:1.2.840.113556.1.4.1941:={group_name}))'
+
+            logging.debug('Doing a recursive query for group base "%s" with ldap filter "%s".', self.user_base, ldap_filter)
+            response = self.connection.search_s(self.user_base, ldap.SCOPE_SUBTREE, ldap_filter, attrs)
+            self.num_queries += 1
+
+            for dn, user_response in response:
+                if not isinstance(dn, bytes):
+                    dn = bytes(dn, 'utf-8')
+                user_data[dn] = user_response
+
+        if cache_file:
+            logging.debug('Caching query results to cache file "%s".', cache_file)
+            self.write_cache(user_data, cache_file)
+
+        return user_data
 
     def get_users(self, users, groups=False, cache_file=None):
 
@@ -171,17 +200,17 @@ class LDAPSearcher:
         for user_base, user_list in user_searches.items():
             for user_search_list in self.split_list(user_list, 100):
                 if len(user_search_list) > 1:
-                    #ldap_filter = f'(&(objectCategory=user)(|{"".join(user_search_list)}))'
-                    ldap_filter = f'(|{"".join(user_search_list)})'
+                    ldap_filter = f'(&(objectCategory=user)(|{"".join(user_search_list)}))'
                 else:
-                    #ldap_filter = f'(&(objectCategory=user){user_search_list[0]})'
-                    ldap_filter = f'{user_search_list[0]}'
+                    ldap_filter = f'(&(objectCategory=user){user_search_list[0]})'
 
                 logging.debug('Doing a query for user base "%s" with ldap filter "%s".', user_base, ldap_filter)
                 response = self.connection.search_s(user_base, ldap.SCOPE_SUBTREE, ldap_filter, attrs)
                 self.num_queries += 1
 
                 for dn, user_response in response:
+                    if not isinstance(dn, bytes):
+                        dn = bytes(dn, 'utf-8')
                     user_data[dn] = user_response
 
         if cache_file:
@@ -207,9 +236,11 @@ def write_ldif(outputfile, user_datas, group_datas):
         ldif_writer = ldif.LDIFWriter(f)
 
         for dn, user_data in user_datas.items():
+            dn = dn.decode('utf-8')
             ldif_writer.unparse(dn, user_data)
 
         for dn, group_data in group_datas.items():
+            dn = dn.decode('utf-8')
             ldif_writer.unparse(dn, group_data)
 
 
@@ -291,48 +322,50 @@ def ldap2files(config,
 
         logging.info('Searching for primary groups and their members')
         primary_groups_data = searcher.get_groups(primary_groups, cache_file=cache_primary)
-
-        primary_members = []
+        primary_groups = []
         for dn, group_d in primary_groups_data.items():
+            primary_groups.append(dn)
             groups_searched.append(dn)
-            primary_members.extend(group_d['member'])
-
-        primary_members = set(primary_members)
-        logging.info('Found %d group members in the primary group.', len(primary_members))
+        primary_groups = set(primary_groups)
+        logging.info('Found %d primary groups.', len(primary_groups))
 
         logging.info("Searching for primary users and their group memberships")
-        primary_users_data = searcher.get_users(primary_members, groups=True, cache_file=cache_primary_users)
+        primary_users_data = searcher.get_groups_users(primary_groups, cache_file=cache_primary_users)
 
-        logging.info('Found %d primary users.', len(primary_users_data))
-
+        primary_users = []
         secondary_groups = []
         for dn, user_d in primary_users_data.items():
+            primary_users.append(dn)
             users_searched.append(dn)
-            secondary_groups.extend([ group_cn for group_cn in user_d['memberOf'] if group_cn not in groups_searched ])
+            secondary_groups.extend(user_d['memberOf'])
 
-        secondary_groups = set(secondary_groups)
+        primary_users = set(primary_users)
+        logging.info('Found %d primary users.', len(primary_users_data))
+        secondary_groups = set(secondary_groups) - primary_groups
         logging.info('Found %d secondary groups.', len(secondary_groups))
 
         logging.info("Searching for secondary groups and their members")
         secondary_groups_data = searcher.get_groups(secondary_groups, cache_file=cache_secondary)
-        secondary_members = []
+        secondary_users = []
         for dn, group_d in secondary_groups_data.items():
             groups_searched.append(dn)
-            secondary_members.extend(group_d['member'])
+            secondary_users.extend(group_d['member'])
 
-        secondary_members = set(secondary_members) - primary_members
-
-        logging.info('Found %d secondary users.', len(secondary_members))
+        secondary_users = set(secondary_users) - primary_users
+        logging.info('Found %d secondary users.', len(secondary_users))
 
         logging.info("Searching for secondary users")
-        secondary_users_data = searcher.get_users(secondary_members, groups=False, cache_file=cache_secondary_users)
+        secondary_users_data = searcher.get_users(secondary_users, groups=False, cache_file=cache_secondary_users)
+
         logging.info('Found %d secondary users.', len(secondary_users_data))
 
         logging.info('Total number of queries made: %d.', searcher.num_queries)
 
         logging.debug('Checking for overlap between searches')
         logging.debug("Number of shared groups in searches: %d", len(set(primary_groups_data.keys()) & set(secondary_groups_data.keys())))
+        logging.debug("Shared groups: %s", set(primary_groups_data.keys()) & set(secondary_groups_data.keys()))
         logging.debug("Number of shared users in searches: %d", len(set(primary_users_data.keys()) & set(secondary_users_data.keys())))
+        logging.debug("Shared users: %s", set(primary_users_data.keys()) & set(secondary_users_data.keys()))
 
         logging.debug('Combining group data')
         all_groups_data = {}
