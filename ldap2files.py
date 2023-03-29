@@ -155,7 +155,7 @@ class LDAPSearcher:
             user_data = self.read_cache(cache_file)
             return user_data
 
-        attrs = self.user_attrs + ['memberOf']
+        attrs = ['dn']
 
         user_data = {}
         for group in groups:
@@ -231,7 +231,6 @@ def get_config_opt(name, conf, arg, require=False):
 
 def write_ldif(outputfile, user_datas, group_datas):
 
-
     with open(outputfile, 'w', encoding='utf-8') as f:
         ldif_writer = ldif.LDIFWriter(f)
 
@@ -244,9 +243,32 @@ def write_ldif(outputfile, user_datas, group_datas):
             ldif_writer.unparse(dn, group_data)
 
 
-def write_groups(user_data, groups_data):
+def write_files(user_datas, group_datas, primary_user_gid=None):
 
-    pass
+    uids = { dn:user_datas[dn]['uidNumber'] for dn in user_datas }
+    nuids = len(uids)
+
+    uids = { dn:uid for dn,uid in uids.items() if uid is not None }
+    nuids_pruned = len(uids)
+
+    if nuids != nuids_pruned:
+        logging.debug('Encountered %d users without UIDs. Skipping them.', nuids-nuids_pruned)
+
+    gids = { dn:group_datas[dn].get('gidNumber',None) for dn in group_datas }
+    ngids = len(gids)
+
+    gids = { dn:gid for dn,gid in gids.items() if gid is not None }
+    ngids_pruned = len(gids)
+
+    if ngids != ngids_pruned:
+        logging.debug('Encountered %d groups without GIDs. Skipping them.', ngids-ngids_pruned)
+
+    with open('passwd', 'w', encoding='utf-8') as f:
+
+        for dn, user_data in user_datas.items():
+            samaccountname = user_data['sAMAccountName']
+            print(samaccountname, primary_user_gid)
+
 
 @click.command()
 @click.option('--config', default=None, type=click.Path(exists=True, readable=True), help='Configuration file to use')
@@ -258,7 +280,11 @@ def write_groups(user_data, groups_data):
 @click.option("--cert", default=None, type=click.Path(exists=True, readable=True), help='Path to certificates')
 @click.option('--user', default=None, help='Username (only valid for bind auths)')
 @click.option('--password', default=None, help='Password (only valid for bind auths)')
+@click.option('--primary-user-gid', default=None, help='Primary GID for users (only valid for files)')
+@click.option('--recursive-primary/--no-recursive-primary', default=False, help='Whether primary group search should be recurive or not')
+@click.option('--secondary-users/--primary-users-only', default=False, help='Whether primary group search should be recurive or not')
 @click.option('--cache-primary/--no-cache-primary', default=False, help='Cache primary group members')
+@click.option('--cache-primary-users-names/--no-cache-primary-users-names', default=False, help="Cache primary group users' names")
 @click.option('--cache-primary-users/--no-cache-primary-users', default=False, help='Cache primary group users')
 @click.option('--cache-secondary/--no-cache-secondary', default=False, help='Cache secondary group members')
 @click.option('--cache-secondary-users/--no-cache-secondary-users', default=False, help='Cache secondary group users')
@@ -274,7 +300,11 @@ def ldap2files(config,
                cert,
                user,
                password,
+               primary_user_gid,
+               recursive_primary,
+               secondary_users,
                cache_primary,
+               cache_primary_users_names,
                cache_primary_users,
                cache_secondary,
                cache_secondary_users,
@@ -296,12 +326,17 @@ def ldap2files(config,
     group_base = get_config_opt('group_base', c, group_base, require=True)
     auth_type = get_config_opt('auth_type', c, auth_type, require=True)
     output_format = get_config_opt('output_format', c, output_format)
+    primary_user_gid = get_config_opt('primary_user_gid', c, primary_user_gid)
+    recursive_primary = get_config_opt('recursive-primary', c, recursive_primary)
+    get_secondary_users = get_config_opt('secondary_users', c, secondary_users)
     cert = get_config_opt('cert', c, cert)
     user = get_config_opt('user', c, user)
     password = get_config_opt('password', c, password)
 
     if cache_primary:
         cache_primary = 'cache_primary.pickle'
+    if cache_primary_users_names:
+        cache_primary_users_names = 'cache_primary_users_names.pickle'
     if cache_primary_users:
         cache_primary_users = 'cache_primary_users.pickle'
     if cache_secondary:
@@ -323,14 +358,21 @@ def ldap2files(config,
         logging.info('Searching for primary groups and their members')
         primary_groups_data = searcher.get_groups(primary_groups, cache_file=cache_primary)
         primary_groups = []
+        primary_users_names = []
         for dn, group_d in primary_groups_data.items():
             primary_groups.append(dn)
             groups_searched.append(dn)
+            primary_users_names.extend(group_d['member'])
         primary_groups = set(primary_groups)
         logging.info('Found %d primary groups.', len(primary_groups))
 
-        logging.info("Searching for primary users and their group memberships")
-        primary_users_data = searcher.get_groups_users(primary_groups, cache_file=cache_primary_users)
+        logging.info("Searching for primary users")
+        if recursive_primary:
+            # Do recursive search for users in group dn if needed
+            primary_users_names = searcher.get_groups_users(primary_groups, cache_file=cache_primary_users_names).keys()
+        logging.info('Found %d primary users.', len(primary_users_names))
+        logging.info("Searching for primary users' group memberships")
+        primary_users_data = searcher.get_users(primary_users_names, groups=True, cache_file=cache_primary_users)
 
         primary_users = []
         secondary_groups = []
@@ -340,7 +382,7 @@ def ldap2files(config,
             secondary_groups.extend(user_d['memberOf'])
 
         primary_users = set(primary_users)
-        logging.info('Found %d primary users.', len(primary_users_data))
+        logging.info('Found group data for %d primary users.', len(primary_users_data))
         secondary_groups = set(secondary_groups) - primary_groups
         logging.info('Found %d secondary groups.', len(secondary_groups))
 
@@ -350,14 +392,24 @@ def ldap2files(config,
         for dn, group_d in secondary_groups_data.items():
             groups_searched.append(dn)
             secondary_users.extend(group_d['member'])
-
         secondary_users = set(secondary_users) - primary_users
-        logging.info('Found %d secondary users.', len(secondary_users))
 
-        logging.info("Searching for secondary users")
-        secondary_users_data = searcher.get_users(secondary_users, groups=False, cache_file=cache_secondary_users)
-
-        logging.info('Found %d secondary users.', len(secondary_users_data))
+        if get_secondary_users:
+            logging.info('Found %d secondary users.', len(secondary_users))
+            logging.info("Searching for secondary users")
+            secondary_users_data = searcher.get_users(secondary_users, groups=False, cache_file=cache_secondary_users)
+            logging.info('Found %d secondary users.', len(secondary_users_data))
+        else:
+            logging.info('Skipping search of secondary users.')
+            secondary_users_data = {}
+            logging.info("Pruning secondary users from secondary groups' members")
+            for dn, group_d in secondary_groups_data.items():
+                members=group_d['member']
+                members_pruned = [ member for member in members if member in primary_users_data ]
+                users_pruned = len(members) - len(members_pruned)
+                if users_pruned > 0:
+                    logging.debug('Pruning %d members from group %s.', users_pruned, dn)
+                group_d['member'] = members_pruned
 
         logging.info('Total number of queries made: %d.', searcher.num_queries)
 
@@ -377,6 +429,8 @@ def ldap2files(config,
         all_users_data.update(secondary_users_data)
         if output_format == 'ldif':
             write_ldif(output, all_users_data, all_groups_data)
+        if output_format == 'files':
+            write_files(all_users_data, all_groups_data, primary_user_gid=primary_user_gid)
 
 if __name__=="__main__":
     ldap2files()
