@@ -113,107 +113,93 @@ class LDAPSearcher:
         for i in range(0, len(l), n):
             yield l[i:i+n]
 
-    def get_groups(self, groups, cache_file=None):
+    def run_search(self, search_dict, attrs, common_filter=None, cache_file=None):
+
         if cache_file and os.path.isfile(cache_file):
             logging.debug('Using cached query from file: %s', cache_file)
-            group_data = self.read_cache(cache_file)
-            return group_data
+            data = self.read_cache(cache_file)
+            return data
 
+        data = {}
+        for base, ldap_filters in search_dict.items():
+            for grouped_search in self.split_list(ldap_filters, 100):
+                if len(grouped_search) > 1:
+                    ldap_filter = f'(|{"".join(grouped_search)})'
+                else:
+                    ldap_filter = f'{grouped_search[0]}'
+
+                if common_filter:
+                    ldap_filter = f'(&{common_filter}{ldap_filter})'
+
+                logging.debug('Doing a query with base "%s" and ldap filter "%s".', base, ldap_filter)
+                response = self.connection.search_s(base, ldap.SCOPE_SUBTREE, ldap_filter, attrs)
+                self.num_queries += 1
+
+                for dn, dn_data in response:
+                    if not isinstance(dn, bytes):
+                        dn = bytes(dn, 'utf-8')
+                    data[dn] = dn_data
+
+        if cache_file:
+            logging.debug('Caching query results to cache file "%s".', cache_file)
+            self.write_cache(data, cache_file)
+
+        return data
+
+
+    def get_groups(self, groups, cache_file=None):
+
+        common_filter = '(objectCategory=group)'
         group_searches = defaultdict(list)
         for group in groups:
             cn, base = self.dn_split(group, self.group_base)
             group_searches[base].append(f'({cn})')
 
-        group_data = {}
-        for group_base, group_list in group_searches.items():
-            for group_search in self.split_list(group_list, 100):
-                if len(group_search) > 1:
-                    ldap_filter = f'(&(objectCategory=group)(|{"".join(group_search)}))'
-                else:
-                    ldap_filter = f'(&(objectCategory=group){group_search[0]})'
-
-                logging.debug('Doing a query for groups from group base "%s" with ldap filter "%s".', group_base, ldap_filter)
-                response = self.connection.search_s(group_base, ldap.SCOPE_SUBTREE, ldap_filter, self.group_attrs)
-                self.num_queries += 1
-
-                for dn, group_response in response:
-                    if not isinstance(dn, bytes):
-                        dn = bytes(dn, 'utf-8')
-                    group_data[dn] = group_response
-
-        if cache_file:
-            logging.debug('Caching query results to cache file "%s".', cache_file)
-            self.write_cache(group_data, cache_file)
+        logging.debug('Doing a query for the following groups: %s', groups)
+        group_data = self.run_search(group_searches,
+                                     self.group_attrs,
+                                     common_filter=common_filter,
+                                     cache_file=cache_file)
 
         return group_data
 
-    def get_groups_users(self, groups, cache_file):
-        if cache_file and os.path.isfile(cache_file):
-            logging.debug('Using cached query from file: %s', cache_file)
-            user_data = self.read_cache(cache_file)
-            return user_data
-
-        attrs = ['dn']
-
-        user_data = {}
-        for group in groups:
-            if isinstance(group, bytes):
-                group_name = group.decode('utf-8')
-            else:
-                group_name = group
-            ldap_filter = f'(&(objectCategory=user)(memberOf:1.2.840.113556.1.4.1941:={group_name}))'
-
-            logging.debug('Doing a recursive query for group base "%s" with ldap filter "%s".', self.user_base, ldap_filter)
-            response = self.connection.search_s(self.user_base, ldap.SCOPE_SUBTREE, ldap_filter, attrs)
-            self.num_queries += 1
-
-            for dn, user_response in response:
-                if not isinstance(dn, bytes):
-                    dn = bytes(dn, 'utf-8')
-                user_data[dn] = user_response
-
-        if cache_file:
-            logging.debug('Caching query results to cache file "%s".', cache_file)
-            self.write_cache(user_data, cache_file)
-
-        return user_data
-
     def get_users(self, users, groups=False, cache_file=None):
-
-        if cache_file and os.path.isfile(cache_file):
-            logging.debug('Using cached query from file: %s', cache_file)
-            user_data = self.read_cache(cache_file)
-            return user_data
 
         attrs = self.user_attrs
         if groups:
             attrs = attrs + ['memberOf']
 
+        common_filter ='(objectCategory=user)'
         user_searches = defaultdict(list)
         for user in users:
             cn, base = self.dn_split(user, self.user_base)
             user_searches[base].append(f'({cn})')
 
-        user_data = {}
-        for user_base, user_list in user_searches.items():
-            for user_search_list in self.split_list(user_list, 100):
-                if len(user_search_list) > 1:
-                    ldap_filter = f'(&(objectCategory=user)(|{"".join(user_search_list)}))'
-                else:
-                    ldap_filter = f'(&(objectCategory=user){user_search_list[0]})'
+        logging.debug('Doing a query for the following users: %s.', users)
+        user_data = self.run_search(user_searches,
+                                    attrs,
+                                    common_filter=common_filter,
+                                    cache_file=cache_file)
 
-                logging.debug('Doing a query for user base "%s" with ldap filter "%s".', user_base, ldap_filter)
-                response = self.connection.search_s(user_base, ldap.SCOPE_SUBTREE, ldap_filter, attrs)
-                self.num_queries += 1
+        return user_data
 
-                for dn, user_response in response:
-                    if not isinstance(dn, bytes):
-                        dn = bytes(dn, 'utf-8')
-                    user_data[dn] = user_response
 
-        if cache_file:
-            logging.debug('Caching query results to cache file "%s".', cache_file)
-            self.write_cache(user_data, cache_file)
+    def get_groups_users(self, group_dns, cache_file=None):
+
+        attrs = ['dn']
+
+        common_filter ='(objectCategory=user)'
+        member_searches = defaultdict(list)
+        for dn in group_dns:
+            if isinstance(dn, bytes):
+                dn = dn.decode('utf-8')
+            member_searches[self.user_base].append(f'(memberOf:1.2.840.113556.1.4.1941:={dn})')
+
+        logging.debug('Doing a query for users in these groups: %s', group_dns)
+        user_data = self.run_search(member_searches,
+                                    attrs,
+                                    common_filter=common_filter,
+                                    cache_file=cache_file)
 
         return user_data
 
