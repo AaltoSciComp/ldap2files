@@ -1,9 +1,14 @@
+#
+# Copyright Simo Tuomisto, Aalto University (2023)
+#
+
 import os
 import re
 import logging
 import sys
 import pickle
 import sys
+import json
 from collections import defaultdict
 
 import click
@@ -21,22 +26,25 @@ class LDAPSearcher:
 
     def __init__(self,
                  server=None,
-                 user_base=None,
-                 group_base=None,
                  auth_type=None,
                  bind_user=None,
                  bind_password=None,
+                 cert=None,
+                 user_base=None,
+                 group_base=None,
                  extra_user_attrs=None,
                  extra_group_attrs=None,
-                 cert=None):
+                 max_query_size=100):
 
         self.server = server
-        self.user_base = user_base
-        self.group_base = group_base
         self.auth_type = auth_type
-        self.cert = cert
         self.bind_user = bind_user
         self.bind_password = bind_password
+        self.cert = cert
+
+        self.user_base = user_base
+        self.group_base = group_base
+        self.max_query_size = int(max_query_size)
 
         group_attrs = ['cn', 'objectClass', 'member', 'gidNumber', 'sAMAccountName', 'memberOf']
         group_attrs.extend(extra_group_attrs)
@@ -134,7 +142,7 @@ class LDAPSearcher:
 
         data = {}
         for base, ldap_filters in search_dict.items():
-            for grouped_search in self.split_list(ldap_filters, 100):
+            for grouped_search in self.split_list(ldap_filters, self.max_query_size):
                 if len(grouped_search) > 1:
                     ldap_filter = f'(|{"".join(grouped_search)})'
                 else:
@@ -261,18 +269,6 @@ class LDAPSearcher:
         return user_data
 
 
-def get_config_opt(name, conf, arg, require=False):
-    """
-    If command line arg is not specified, try to get
-    value from a configuration dictionary.
-    """
-    if arg is not None:
-        return arg
-    value = conf.get(name, None)
-    if require:
-        assert value is not None, f'{name} needs to be specified!'
-    return value
-
 
 def override_values(datadict, overrides):
     """
@@ -295,7 +291,7 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
     """
     Write group and user data as LDIF files.
     """
-    userfile = f'{output_prefix}_users.ldif'
+    userfile = f'{output_prefix}users.ldif'
     with open(userfile, 'w', encoding='utf-8') as f:
         ldif_writer = ldif.LDIFWriter(f)
 
@@ -306,7 +302,7 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
             dn = dn.decode('utf-8')
             ldif_writer.unparse(dn, user_data)
 
-    groupfile = f'{output_prefix}_groups.ldif'
+    groupfile = f'{output_prefix}groups.ldif'
     with open(groupfile, 'w', encoding='utf-8') as f:
         ldif_writer = ldif.LDIFWriter(f),
         for dn in sorted(group_datas):
@@ -317,7 +313,7 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
             ldif_writer.unparse(dn, group_data)
 
 
-def write_files(user_datas, group_datas, primary_user_gid=None, validation_standard='rhel'):
+def write_files(output_prefix, user_datas, group_datas, primary_user_gid=None, validation_standard='rhel'):
     """
     Write group and user data as Unix style files
     """
@@ -341,7 +337,7 @@ def write_files(user_datas, group_datas, primary_user_gid=None, validation_stand
 
     passwd_format = '{username}:{password}:{uid}:{gid}:{name}:{home}:{shell}\n'
 
-    with open('passwd', 'w', encoding='utf-8') as f:
+    with open(f'{output_prefix}passwd', 'w', encoding='utf-8') as f:
 
         for dn in sorted(user_datas):
             user_data = user_datas[dn]
@@ -378,7 +374,7 @@ def write_files(user_datas, group_datas, primary_user_gid=None, validation_stand
     group_format = '{groupname}:{password}:{gid}:{users}\n'
 
 
-    with open('group', 'w', encoding='utf-8') as f:
+    with open(f'{output_prefix}group', 'w', encoding='utf-8') as f:
 
         for dn in sorted(group_datas):
             group_data = group_datas[dn]
@@ -449,21 +445,50 @@ def get_unique_memberships(data, base=None):
     return set(membership_dn_names)
 
 
+def read_config(ctx, param, value):
+    """
+    Try to get value from a configuration dictionary.
+    """
+    if value:
+        with open(value, 'r') as f:
+            c = yaml.load(f, Loader=Loader)
+        for key,value in c.items():
+            if isinstance(value, dict):
+                c[key] = json.dumps(value)
+        ctx.default_map = c
+
+
+def get_param_dict(ctx, param, value):
+    if value is not None:
+        try:
+            data = json.loads(value)
+            print(data)
+            return data
+        except json.decoder.JSONDecodeError as e:
+            raise ctx.fail(f"Parameter {param.name} is not a valid dictionary with value {value}")
+    return value
+
 @click.command()
-@click.option('--config', default=None, type=click.Path(exists=True, readable=True), help='Configuration file to use')
-@click.option('--groups', default=None, help='Groups to search from LDAP (comma separated list)')
-@click.option('--server', default=None, help='AD server')
-@click.option('--user-base', default=None, help='Group search base')
-@click.option('--group-base', default=None, help='Group search base')
-@click.option('--extra-user-attrs', default=None, help='Extra user attributes')
-@click.option('--extra-group-attrs', default=None, help='Extra group attributes to search')
+@click.option('--config',
+              default=None,
+              type=click.Path(exists=True, readable=True, dir_okay=False),
+              callback=read_config,
+              is_eager=True,
+              expose_value=False,
+              help='Configuration file to use')
+@click.option('--groups', required=True, help='Groups to search from LDAP (comma separated list)')
+@click.option('--server', required=True, help='AD server')
+@click.option('--user-base', required=True, help='Group search base')
+@click.option('--group-base', required=True, help='Group search base')
+@click.option('--extra-user-attrs', default='', help='Extra user attributes')
+@click.option('--extra-group-attrs', default='', help='Extra group attributes to search')
 @click.option('--auth-type', default='gssapi', type=click.Choice(("bind", "gssapi")), help='Authentication type')
-@click.option("--cert", default=None, type=click.Path(exists=True, readable=True), help='Path to certificates')
+@click.option("--cert", default='/etc/ssl/certs/ca-certificates.crt', type=click.Path(exists=True, readable=True), help='Path to certificates')
 @click.option('--user', default=None, help='Username (only valid for bind auths)')
 @click.option('--password', default=None, help='Password (only valid for bind auths)')
 @click.option('--primary-user-gid', default=None, help='Primary GID for users (only valid for files)')
-@click.option('--recursive-primary/--no-recursive-primary', default=None, help='Whether primary group search should be recurive or not')
-@click.option('--recursive-strategy', default='memberwise', type=click.Choice(('groupwise','memberwise')), nargs=1, help="Which recursive strategy to use when doing the search: recursively from primary groups members or from memberOf-attribute")
+@click.option('--recursive-primary/--no-recursive-primary', default=False, help='Whether primary group search should be recurive or not')
+@click.option('--recursive-strategy', default='memberwise', type=click.Choice(('groupwise','memberwise')), help="Which recursive strategy to use when doing the search: recursively from primary groups members or from memberOf-attribute")
 @click.option('--secondary-users/--primary-users-only', default=False, help='Whether primary group search should be recurive or not')
 @click.option('--cache-primary/--no-cache-primary', default=False, help='Cache primary group members')
 @click.option('--cache-primary-users-names/--no-cache-primary-users-names', default=False, help="Cache primary group users' names")
@@ -472,68 +497,50 @@ def get_unique_memberships(data, base=None):
 @click.option('--cache-secondary-users/--no-cache-secondary-users', default=False, help='Cache secondary group users')
 @click.option('--cache-all/--no-cache-all', default=False, help='Cache all steps')
 @click.option("--loglevel", default="info", type=click.Choice(("debug", "info", "warning")))
-@click.option("--output-format", default="files", type=click.Choice(("files", "ldif")), help='Output file type')
-@click.option("--output-prefix", default='data', help='Output file name prefix')
+@click.option("--output-format", default='files', type=click.Choice(("files", "ldif")), help='Output file type')
+@click.option("--output-prefix", default='', help='Output file name prefix')
 @click.option('--sort-ldif/--no-sort-ldif', default=False, help='Sort LDIF group memberships (for LDIF output)')
 @click.option('--validation-standard', default='shadow-utils', type=click.Choice(('shadow-utils', 'rhel','ubuntu')), help='Validation standard for user and group names (for files output)')
-def ldap2files(config,
-               groups,
-               server,
-               user_base,
-               group_base,
-               extra_user_attrs,
-               extra_group_attrs,
-               auth_type,
-               cert,
-               user,
-               password,
-               primary_user_gid,
-               recursive_primary,
-               recursive_strategy,
-               secondary_users,
-               cache_primary,
-               cache_primary_users_names,
-               cache_primary_users,
-               cache_secondary,
-               cache_secondary_users,
-               cache_all,
-               loglevel,
-               output_format,
-               output_prefix,
-               sort_ldif,
-               validation_standard):
+@click.option('--max-query-size', default=100, type=int, help='Validation standard for user and group names (for files output)')
+@click.option('--user-overrides', default=None, callback=get_param_dict, help='User overrides (JSON dictionary format)')
+@click.option('--group-overrides', default=None, callback=get_param_dict, help='Group overrides (JSON dictionary format)')
+def ldap2files(**args):
 
-    loglevel = loglevel.upper()
-    logging.getLogger().setLevel(loglevel)
+    logging.getLogger().setLevel(args['loglevel'].upper())
 
-    c = {}
-    if config:
-        with open(config, 'r') as f:
-            c.update(yaml.load(f, Loader=Loader))
+    server=args['server']
+    auth_type=args['auth_type']
+    cert=args['cert']
+    bind_user=args['user']
+    bind_password=args['password']
+    max_query_size=args['max_query_size']
 
-    primary_groups = get_config_opt('groups', c, groups, require=True).split(',')
-    server = get_config_opt('server', c, server, require=True)
-    user_base = get_config_opt('user_base', c, user_base, require=True)
-    group_base = get_config_opt('group_base', c, group_base, require=True)
-    extra_user_attrs = get_config_opt('extra_user_attrs', c, extra_user_attrs).split(',')
-    extra_group_attrs = get_config_opt('extra_group_attrs', c, extra_group_attrs).split(',')
-    auth_type = get_config_opt('auth_type', c, auth_type, require=True)
-    output_format = get_config_opt('output_format', c, output_format)
-    primary_user_gid = get_config_opt('primary_user_gid', c, primary_user_gid)
-    recursive_primary = get_config_opt('recursive_primary', c, recursive_primary)
-    get_secondary_users = get_config_opt('secondary_users', c, secondary_users)
+    primary_groups = args['groups'].split(',')
+    recursive_primary=args['recursive_primary']
+    recursive_strategy=args['recursive_strategy']
 
-    user_overrides = get_config_opt('user_overrides', c, None)
-    if not user_overrides:
-        user_overrides = {}
-    group_overrides = get_config_opt('group_overrides', c, None)
-    if not group_overrides:
-        group_overrides = {}
+    primary_user_gid = args['primary_user_gid']
 
-    cert = get_config_opt('cert', c, cert)
-    user = get_config_opt('user', c, user)
-    password = get_config_opt('password', c, password)
+    get_secondary_users=args['secondary_users']
 
+    user_base=args['user_base']
+    group_base=args['group_base']
+
+    extra_user_attrs=args['extra_user_attrs'].split(',')
+    extra_group_attrs=args['extra_group_attrs'].split(',')
+    user_overrides = args['user_overrides']
+    group_overrides = args['group_overrides']
+
+    output_format = args['output_format']
+    output_prefix = args['output_prefix']
+    validation_standard = args['validation_standard']
+
+    cache_all = args['cache_all']
+    cache_primary = args['cache_primary']
+    cache_primary_users_names = args['cache_primary_users_names']
+    cache_primary_users = args['cache_primary_users']
+    cache_secondary = args['cache_secondary']
+    cache_secondary_users = args['cache_secondary_users']
     if cache_primary or cache_all:
         cache_primary = 'cache_primary.pickle'
     if cache_primary_users_names or cache_all:
@@ -545,15 +552,17 @@ def ldap2files(config,
     if cache_secondary_users or cache_all:
         cache_secondary_users = 'cache_secondary_users.pickle'
 
+
     with LDAPSearcher(server=server,
+                      auth_type=auth_type,
+                      bind_user=bind_user,
+                      bind_password=bind_password,
+                      cert=cert,
                       user_base=user_base,
                       group_base=group_base,
-                      auth_type=auth_type,
                       extra_user_attrs=extra_user_attrs,
                       extra_group_attrs=extra_group_attrs,
-                      cert=cert,
-                      bind_user=user,
-                      bind_password=password) as searcher:
+                      max_query_size=max_query_size) as searcher:
 
         groups_searched = set()
         users_searched = set()
@@ -659,17 +668,17 @@ def ldap2files(config,
         all_users_data.update(secondary_users_data)
         logging.info('Found %d users.', len(all_users_data))
 
-        if len(group_overrides) > 0:
+        if group_overrides:
             logging.info('Running override for groups')
             all_groups_data = override_values(all_groups_data, group_overrides)
-        if len(user_overrides) > 0:
+        if user_overrides:
             logging.info('Running override for users')
             all_users_data = override_values(all_users_data, user_overrides)
 
         if output_format == 'ldif':
             write_ldif(output_prefix, all_users_data, all_groups_data, sorting=sort_ldif)
         if output_format == 'files':
-            write_files(all_users_data, all_groups_data, primary_user_gid=primary_user_gid, validation_standard=validation_standard)
+            write_files(output_prefix, all_users_data, all_groups_data, primary_user_gid=primary_user_gid, validation_standard=validation_standard)
 
 if __name__=="__main__":
     ldap2files()
