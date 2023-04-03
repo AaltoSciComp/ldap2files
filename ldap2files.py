@@ -42,7 +42,7 @@ class LDAPSearcher:
         group_attrs.extend(extra_group_attrs)
         self.group_attrs = list(set(group_attrs))
 
-        user_attrs = ['cn', 'objectClass', 'uidNumber', 'sAMAccountName']
+        user_attrs = ['cn', 'objectClass', 'uidNumber', 'sAMAccountName', 'loginShell']
         user_attrs.extend(extra_user_attrs)
         self.user_attrs = list(set(user_attrs))
 
@@ -308,7 +308,7 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
 
     groupfile = f'{output_prefix}_groups.ldif'
     with open(groupfile, 'w', encoding='utf-8') as f:
-        ldif_writer = ldif.LDIFWriter(f)
+        ldif_writer = ldif.LDIFWriter(f),
         for dn in sorted(group_datas):
             group_data = group_datas[dn]
             if 'member' in group_data and sorting:
@@ -317,34 +317,95 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
             ldif_writer.unparse(dn, group_data)
 
 
-def write_files(user_datas, group_datas, primary_user_gid=None):
+def write_files(user_datas, group_datas, primary_user_gid=None, validation_standard='rhel'):
     """
     Write group and user data as Unix style files
     """
 
-    uids = { dn:user_datas[dn]['uidNumber'] for dn in user_datas }
-    nuids = len(uids)
+    # For more on validation standards, see: https://systemd.io/USER_NAMES/
+    validation_regex_dict = {
+        'shadow-utils': '^[a-z_][a-z0-9_-]*[$]?$',
+        'rhel': '^[a-zA-Z0-9_.][a-zA-Z0-9_.-]{0,30}[a-zA-Z0-9_.$-]?$',
+        'ubuntu': '^[a-z][-a-z0-9]*$',
+    }
 
-    uids = { dn:uid for dn,uid in uids.items() if uid is not None }
-    nuids_pruned = len(uids)
+    validation_re = re.compile(validation_regex_dict[validation_standard])
 
-    if nuids != nuids_pruned:
-        logging.debug('Encountered %d users without UIDs. Skipping them.', nuids-nuids_pruned)
+    def decode_values(d):
+        d_decoded = {}
+        for key, value in d.items():
+            if isinstance(value, bytes):
+                value = value.decode('utf-8').strip()
+            d_decoded[key] = value
+        return d_decoded
 
-    gids = { dn:group_datas[dn].get('gidNumber',None) for dn in group_datas }
-    ngids = len(gids)
-
-    gids = { dn:gid for dn,gid in gids.items() if gid is not None }
-    ngids_pruned = len(gids)
-
-    if ngids != ngids_pruned:
-        logging.debug('Encountered %d groups without GIDs. Skipping them.', ngids-ngids_pruned)
+    passwd_format = '{username}:{password}:{uid}:{gid}:{name}:{home}:{shell}\n'
 
     with open('passwd', 'w', encoding='utf-8') as f:
 
-        for dn, user_data in user_datas.items():
-            samaccountname = user_data['sAMAccountName']
-            print(samaccountname, primary_user_gid)
+        for dn in sorted(user_datas):
+            user_data = user_datas[dn]
+            if 'uidNumber' not in user_data:
+                logging.debug('User %s does not have an uidNumber', dn)
+                continue
+            if 'unixHomeDirectory' not in user_data:
+                logging.debug('User %s does not have an unixHomeDirectory', dn)
+                continue
+            if 'loginShell' not in user_data:
+                logging.debug('User %s does not have an loginShell', dn)
+                continue
+            passwd = {
+                'username': user_data['sAMAccountName'][0],
+                'password': '*',
+                'uid': user_data['uidNumber'][0],
+                'gid': primary_user_gid if primary_user_gid else user_data['uidNumber'][0],
+                'name': user_data['cn'][0],
+                'home': user_data['unixHomeDirectory'][0],
+                'shell': user_data['loginShell'][0],
+            }
+            passwd = decode_values(passwd)
+
+            passwd['username'] = passwd['username'].lower()
+
+            if not validation_re.match(passwd['username']):
+                logging.debug('User %s with username %s does not pass the validation standard.', dn, passwd['username'])
+                continue
+
+            f.write(passwd_format.format(**passwd))
+
+    usernames = { dn:user_data['sAMAccountName'][0].decode('utf-8').lower() for dn, user_data in user_datas.items() }
+
+    group_format = '{groupname}:{password}:{gid}:{users}\n'
+
+
+    with open('group', 'w', encoding='utf-8') as f:
+
+        for dn in sorted(group_datas):
+            group_data = group_datas[dn]
+            if 'gidNumber' not in group_data:
+                logging.debug('Group %s does not have an GID', dn)
+                continue
+
+            users = [ usernames[dn] for dn in group_data.get('member', []) if dn in usernames]
+            users = list(filter(validation_re.match, users))
+
+            group = {
+                'groupname': group_data['sAMAccountName'][0],
+                'password': '*',
+                'gid': group_data['gidNumber'][0],
+                'users': ','.join(users),
+            }
+            group = decode_values(group)
+
+            # Validate group names
+
+            group['groupname'] = group['groupname'].lower()
+
+            if not validation_re.match(group['groupname']):
+                logging.debug('Group %s with groupname %s does not pass the validation standard.', dn, group['groupname'])
+                continue
+
+            f.write(group_format.format(**group))
 
 def get_unique_members(data, base=None):
     """
@@ -412,8 +473,9 @@ def get_unique_memberships(data, base=None):
 @click.option('--cache-all/--no-cache-all', default=False, help='Cache all steps')
 @click.option("--loglevel", default="info", type=click.Choice(("debug", "info", "warning")))
 @click.option("--output-format", default="files", type=click.Choice(("files", "ldif")), help='Output file type')
-@click.option("--output-prefix", default='data', help='Output file name prefix (for ldif data)')
-@click.option('--sort-ldif/--no-sort-ldif', default=False, help='Sort LDIF group memberships')
+@click.option("--output-prefix", default='data', help='Output file name prefix')
+@click.option('--sort-ldif/--no-sort-ldif', default=False, help='Sort LDIF group memberships (for LDIF output)')
+@click.option('--validation-standard', default='shadow-utils', type=click.Choice(('shadow-utils', 'rhel','ubuntu')), help='Validation standard for user and group names (for files output)')
 def ldap2files(config,
                groups,
                server,
@@ -438,7 +500,8 @@ def ldap2files(config,
                loglevel,
                output_format,
                output_prefix,
-               sort_ldif):
+               sort_ldif,
+               validation_standard):
 
     loglevel = loglevel.upper()
     logging.getLogger().setLevel(loglevel)
@@ -606,7 +669,7 @@ def ldap2files(config,
         if output_format == 'ldif':
             write_ldif(output_prefix, all_users_data, all_groups_data, sorting=sort_ldif)
         if output_format == 'files':
-            write_files(all_users_data, all_groups_data, primary_user_gid=primary_user_gid)
+            write_files(all_users_data, all_groups_data, primary_user_gid=primary_user_gid, validation_standard=validation_standard)
 
 if __name__=="__main__":
     ldap2files()
