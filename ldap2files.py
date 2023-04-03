@@ -166,7 +166,7 @@ class LDAPSearcher:
 
         common_filter = '(objectCategory=group)'
         group_searches = defaultdict(list)
-        for group in groups:
+        for group in sorted(groups):
             cn, base = self.dn_split(group, self.group_base)
             group_searches[base].append(f'({cn})')
 
@@ -224,7 +224,7 @@ class LDAPSearcher:
 
         common_filter ='(objectCategory=user)'
         user_searches = defaultdict(list)
-        for user in users:
+        for user in sorted(users):
             cn, base = self.dn_split(user, self.user_base)
             user_searches[base].append(f'({cn})')
 
@@ -247,7 +247,7 @@ class LDAPSearcher:
 
         common_filter ='(objectCategory=user)'
         member_searches = defaultdict(list)
-        for dn in group_dns:
+        for dn in sorted(group_dns):
             if isinstance(dn, bytes):
                 dn = dn.decode('utf-8')
             member_searches[self.user_base].append(f'(memberOf:1.2.840.113556.1.4.1941:={dn})')
@@ -291,16 +291,18 @@ def override_values(datadict, overrides):
     return datadict
 
 
-def write_ldif(output_prefix, user_datas, group_datas):
+def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
     """
     Write group and user data as LDIF files.
-    """"
+    """
     userfile = f'{output_prefix}_users.ldif'
     with open(userfile, 'w', encoding='utf-8') as f:
         ldif_writer = ldif.LDIFWriter(f)
 
         for dn in sorted(user_datas):
             user_data = user_datas[dn]
+            if 'memberOf' in user_data and sorting:
+                user_data['memberOf'] = sorted(user_data['memberOf'])
             dn = dn.decode('utf-8')
             ldif_writer.unparse(dn, user_data)
 
@@ -309,7 +311,8 @@ def write_ldif(output_prefix, user_datas, group_datas):
         ldif_writer = ldif.LDIFWriter(f)
         for dn in sorted(group_datas):
             group_data = group_datas[dn]
-            logging.debug('Wrote group %s with %d members.', dn, len(group_data.get('member',[])))
+            if 'member' in group_data and sorting:
+                group_data['member'] = sorted(group_data['member'])
             dn = dn.decode('utf-8')
             ldif_writer.unparse(dn, group_data)
 
@@ -343,24 +346,45 @@ def write_files(user_datas, group_datas, primary_user_gid=None):
             samaccountname = user_data['sAMAccountName']
             print(samaccountname, primary_user_gid)
 
-
-def get_unique_members(data):
+def get_unique_members(data, base=None):
     """
     Get unique members of a data dictionary (keys are DN's)
     """
+
+
     member_dn_names = []
     for d in data.values():
         member_dn_names.extend(d.get('member', {}))
+
+    if base:
+        if isinstance(base, bytes):
+            base=base.decode('utf-8').lower()
+        member_dn_names_filtered = []
+        for dn in member_dn_names:
+            if base in dn.decode('utf-8').lower():
+                member_dn_names_filtered.append(dn)
+        member_dn_names = member_dn_names_filtered
+
     return set(member_dn_names)
 
 
-def get_unique_memberships(data):
+def get_unique_memberships(data, base=None):
     """
     Get unique memberships of a data dictionary (keys are DN's)
     """
     membership_dn_names = []
     for d in data.values():
         membership_dn_names.extend(d.get('memberOf', {}))
+
+    if base:
+        if isinstance(base, bytes):
+            base=base.decode('utf-8').lower()
+        membership_dn_names_filtered = []
+        for dn in membership_dn_names:
+            if base in dn.decode('utf-8').lower():
+                membership_dn_names_filtered.append(dn)
+        membership_dn_names = membership_dn_names_filtered
+
     return set(membership_dn_names)
 
 
@@ -389,6 +413,7 @@ def get_unique_memberships(data):
 @click.option("--loglevel", default="info", type=click.Choice(("debug", "info", "warning")))
 @click.option("--output-format", default="files", type=click.Choice(("files", "ldif")), help='Output file type')
 @click.option("--output-prefix", default='data', help='Output file name prefix (for ldif data)')
+@click.option('--sort-ldif/--no-sort-ldif', default=False, help='Sort LDIF group memberships')
 def ldap2files(config,
                groups,
                server,
@@ -412,7 +437,8 @@ def ldap2files(config,
                cache_all,
                loglevel,
                output_format,
-               output_prefix):
+               output_prefix,
+               sort_ldif):
 
     loglevel = loglevel.upper()
     logging.getLogger().setLevel(loglevel)
@@ -469,46 +495,71 @@ def ldap2files(config,
         groups_searched = set()
         users_searched = set()
 
+        """
+        PRIMARY GROUP SEARCH
+        """
+
         logging.info('Searching for primary groups and their members')
 
         if recursive_primary and recursive_strategy == 'groupwise':
+            # Find all primary groups via recursive search
             primary_groups_data = searcher.get_groups_recursive(primary_groups, cache_file=cache_primary)
         else:
+            # Check only the primary group
             primary_groups_data = searcher.get_groups(primary_groups, cache_file=cache_primary)
         primary_groups_dn_names = set(primary_groups_data.keys())
         groups_searched = groups_searched | primary_groups_dn_names
 
         logging.info('Found %d primary groups.', len(primary_groups_dn_names))
+        for dn in sorted(list(primary_groups_dn_names)):
+            logging.debug(dn)
+
+        """
+        PRIMARY USER SEARCH
+        """
 
         logging.info("Searching for primary users")
 
         if recursive_primary and recursive_strategy == 'memberwise':
+            # If primary group was recursive, search users that belong to it
             primary_users_dn_names = set(searcher.get_groups_members(primary_groups_dn_names, cache_file=cache_primary_users_names).keys())
         else:
-            primary_users_dn_names = get_unique_members(primary_groups_data)
+            # Use primary group members as information on primary users
+            primary_users_dn_names = get_unique_members(primary_groups_data, base=user_base)
         logging.info('Found %d primary users.', len(primary_users_dn_names))
+        for dn in sorted(list(primary_users_dn_names)):
+            logging.debug(dn)
 
         logging.info("Searching for primary users' group memberships")
         primary_users_data = searcher.get_users(primary_users_dn_names, groups=True, cache_file=cache_primary_users)
         users_searched = users_searched | primary_users_dn_names
 
-        logging.info('Found group data for %d primary users.', len(primary_users_data))
+        logging.info('Found data from %d primary users.', len(primary_users_data))
 
-        secondary_groups_dn_names = get_unique_memberships(primary_users_data) - primary_groups_dn_names
+        """
+        SECONDARY GROUP SEARCH
+        """
+
+        secondary_groups_dn_names = get_unique_memberships(primary_users_data, base=group_base) - primary_groups_dn_names
         logging.info('Found %d secondary groups.', len(secondary_groups_dn_names))
+        for dn in sorted(list(secondary_groups_dn_names)):
+            logging.debug(dn)
 
         logging.info("Searching for secondary groups and their members")
         secondary_groups_data = searcher.get_groups(secondary_groups_dn_names, cache_file=cache_secondary)
         groups_searched = groups_searched | secondary_groups_dn_names
 
-        secondary_users_dn_names = get_unique_members(secondary_groups_data) - primary_users_dn_names
-        logging.info('Found %d secondary users.', len(secondary_users_dn_names))
-
+        """
+        SECONDARY USER SEARCH
+        """
+        secondary_users_dn_names = get_unique_members(secondary_groups_data, base=user_base) - primary_users_dn_names
         if get_secondary_users:
             logging.info("Searching for secondary users")
-            secondary_users_data = searcher.get_users(secondary_users, groups=False, cache_file=cache_secondary_users)
+            secondary_users_data = searcher.get_users(secondary_users_dn_names, groups=False, cache_file=cache_secondary_users)
             users_searched = users_searched | secondary_users_dn_names
             logging.info('Found %d secondary users.', len(secondary_users_data))
+            for dn in sorted(list(secondary_users_dn_names)):
+                logging.debug(dn)
         else:
             logging.info('Skipping search of secondary users.')
             secondary_users_data = {}
@@ -520,6 +571,10 @@ def ldap2files(config,
                 if users_pruned > 0:
                     logging.debug('Pruning %d members from group %s.', users_pruned, dn)
                 group_d['member'] = members_pruned
+
+        """
+        COMBINING AND OUTPUT
+        """
 
         logging.info('Total number of queries made: %d.', searcher.num_queries)
 
@@ -549,7 +604,7 @@ def ldap2files(config,
             all_users_data = override_values(all_users_data, user_overrides)
 
         if output_format == 'ldif':
-            write_ldif(output_prefix, all_users_data, all_groups_data)
+            write_ldif(output_prefix, all_users_data, all_groups_data, sorting=sort_ldif)
         if output_format == 'files':
             write_files(all_users_data, all_groups_data, primary_user_gid=primary_user_gid)
 
