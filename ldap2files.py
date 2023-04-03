@@ -297,17 +297,17 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
 
         for dn in sorted(user_datas):
             user_data = user_datas[dn]
-            if 'memberOf' in user_data and sorting:
+            if sorting and 'memberOf' in user_data:
                 user_data['memberOf'] = sorted(user_data['memberOf'])
             dn = dn.decode('utf-8')
             ldif_writer.unparse(dn, user_data)
 
     groupfile = f'{output_prefix}groups.ldif'
     with open(groupfile, 'w', encoding='utf-8') as f:
-        ldif_writer = ldif.LDIFWriter(f),
+        ldif_writer = ldif.LDIFWriter(f)
         for dn in sorted(group_datas):
             group_data = group_datas[dn]
-            if 'member' in group_data and sorting:
+            if sorting and 'member' in group_data:
                 group_data['member'] = sorted(group_data['member'])
             dn = dn.decode('utf-8')
             ldif_writer.unparse(dn, group_data)
@@ -462,7 +462,6 @@ def get_param_dict(ctx, param, value):
     if value is not None:
         try:
             data = json.loads(value)
-            print(data)
             return data
         except json.decoder.JSONDecodeError as e:
             raise ctx.fail(f"Parameter {param.name} is not a valid dictionary with value {value}")
@@ -533,6 +532,7 @@ def ldap2files(**args):
 
     output_format = args['output_format']
     output_prefix = args['output_prefix']
+    sort_ldif = args['sort_ldif']
     validation_standard = args['validation_standard']
 
     cache_all = args['cache_all']
