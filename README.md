@@ -139,6 +139,10 @@ Options:
                                   (for files output)
   --user-overrides TEXT           User overrides (JSON dictionary format)
   --group-overrides TEXT          Group overrides (JSON dictionary format)
+  --user-defaults TEXT            User defaults if attributes are missing
+                                  (JSON dictionary format)
+  --group-defaults TEXT           Group defaults if attributes are missing
+                                  (JSON dictionary format)
   --help                          Show this message and exit.
 ```
 
@@ -162,5 +166,6 @@ user_overrides:
 group_overrides: {}
 ```
 
-`user_overrides` and `group_overrides` expect dictionaries and from the
-command line they should be specified as JSON dictionaries.
+`user_defaults`, `group_defaults`, `user_overrides` and `group_overrides`
+that expect dictionaries can be specified from the command line with JSON
+dictonary syntax.

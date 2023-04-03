@@ -270,15 +270,17 @@ class LDAPSearcher:
 
 
 
-def override_values(datadict, overrides):
+def override_values(datadict, overrides, soft=False):
     """
-    Override values in the LDAP entries.
+    Override values in the LDAP entries. Soft override will write only if the value is missing.
 
     Format used is the python string formatting format for named values.
     """
     for attr, override_fmt in overrides.items():
         logging.debug('Running override for %s with format: %s', attr, override_fmt)
         for dn in datadict.keys():
+            if soft and attr in datadict[dn]:
+                continue
             data_decoded = {}
             for key,value in datadict[dn].items():
                 if len(value) == 1:
@@ -503,6 +505,8 @@ def get_param_dict(ctx, param, value):
 @click.option('--max-query-size', default=100, type=int, help='Validation standard for user and group names (for files output)')
 @click.option('--user-overrides', default=None, callback=get_param_dict, help='User overrides (JSON dictionary format)')
 @click.option('--group-overrides', default=None, callback=get_param_dict, help='Group overrides (JSON dictionary format)')
+@click.option('--user-defaults', default=None, callback=get_param_dict, help='User defaults if attributes are missing (JSON dictionary format)')
+@click.option('--group-defaults', default=None, callback=get_param_dict, help='Group defaults if attributes are missing (JSON dictionary format)')
 def ldap2files(**args):
 
     logging.getLogger().setLevel(args['loglevel'].upper())
@@ -529,6 +533,8 @@ def ldap2files(**args):
     extra_group_attrs=args['extra_group_attrs'].split(',')
     user_overrides = args['user_overrides']
     group_overrides = args['group_overrides']
+    user_defaults = args['user_defaults']
+    group_defaults = args['group_defaults']
 
     output_format = args['output_format']
     output_prefix = args['output_prefix']
@@ -668,9 +674,15 @@ def ldap2files(**args):
         all_users_data.update(secondary_users_data)
         logging.info('Found %d users.', len(all_users_data))
 
+        if group_defaults:
+            logging.info('Running defaults for groups')
+            all_groups_data = override_values(all_groups_data, group_defaults, soft=True)
         if group_overrides:
             logging.info('Running override for groups')
             all_groups_data = override_values(all_groups_data, group_overrides)
+        if user_defaults:
+            logging.info('Running defaults for users')
+            all_users_data = override_values(all_users_data, user_defaults, soft=True)
         if user_overrides:
             logging.info('Running override for users')
             all_users_data = override_values(all_users_data, user_overrides)
