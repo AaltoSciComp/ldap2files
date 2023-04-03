@@ -54,8 +54,8 @@ In memberwise recursive search the script uses an LDAP query
 `memberOf:1.2.840.113556.1.4.1941:=GROUP_DN` for doing a recursive check on which users
 belong to the primary group. This is slower as the query needs to be done to the whole
 AD space and if the group has a lot of members the query can grow too big. However,
-it might reflect the group structure more accurately. Recommendation would be to see if the
-memberwise query and groupwise query match.
+it might reflect the group structure more accurately. The recommendation is that you
+run a memberwise query and groupwise query and check if the outputs match.
 
 ```mermaid
 flowchart TD
@@ -67,8 +67,8 @@ flowchart TD
 
 All queries are grouped based on the searched user's/group's OU bases.
 So for example, if user A and user B belong to the same OU base
-(e.g. OU=users,DC=org,DC=example,DC=com), they will be qeuried at the same
-time using an LDAP filter with an or-statement (`(|(CN=userA)(CN=userB))`).
+(e.g. OU=users,DC=org,DC=example,DC=com), they will be queried at the same
+time using an LDAP filter with an or-statement (`|(CN=userA)(CN=userB)`).
 This dramatically reduces the number of queries if users/groups belong to
 common organizational units.
 
@@ -146,7 +146,7 @@ All of the flags can also be given in a configuration yaml that can be
 given via the `--config`-option. Command line arguments will have preference
 over configuration file arguments. Dashes in the command line parameters are
 written as underscores in the configuration file (e.g. `--user-base X` from
-the command line and `user_base: X` from the configuration file are equal).
+the command line and `user_base: X` would work the same).
 
 Example configuration file:
 ```yml
