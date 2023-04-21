@@ -169,3 +169,12 @@ group_overrides: {}
 `user_defaults`, `group_defaults`, `user_overrides` and `group_overrides`
 that expect dictionaries can be specified from the command line with JSON
 dictonary syntax.
+
+## Running with machine keytab
+
+If you have a machine that is joined to an AD domain you can also use machine keytab
+instead of user credential cache by setting the path to the Kerberos keytab:
+
+```sh
+export KRB5_CLIENT_KTNAME=/etc/krb.keytab
+```
