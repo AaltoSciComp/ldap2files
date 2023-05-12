@@ -269,6 +269,34 @@ class LDAPSearcher:
         return user_data
 
 
+def override_dns(datadict, overrides):
+    """
+    Override DNs in the LDAP entries.
+
+    Overrides should be a dictionary with pattern as the key and format
+    as the value. Pattern should be a valid Python regular expression
+    string and format is a Python string formatting format for named
+    values. Patterns should capture wanted values with (?P<name>...).
+    """
+
+    datadict_formatted = {}
+
+    for override_regex, override_fmt in overrides.items():
+        logging.debug('Running override for DNs with regex %s and format %s', override_regex, override_fmt)
+        for dn in datadict.keys():
+            if isinstance(dn, bytes):
+                dn_new = dn.decode('utf-8')
+            match = re.match(override_regex, dn_new)
+            if match:
+                dn_new = override_fmt.format(**match.groupdict())
+
+            dn_new = dn_new.encode('utf-8')
+            assert dn_new not in datadict_formatted, \
+                f"Problem with DN override! DN {dn} matches another entry after override!"
+            datadict_formatted[dn_new] = datadict[dn]
+
+    return datadict_formatted
+
 
 def override_values(datadict, overrides, soft=False):
     """
@@ -482,6 +510,7 @@ def get_param_dict(ctx, param, value):
             raise ctx.fail(f"Parameter {param.name} is not a valid dictionary with value {value}")
     return value
 
+
 @click.command()
 @click.option('--config',
               default=None,
@@ -520,6 +549,7 @@ def get_param_dict(ctx, param, value):
 @click.option('--max-query-size', default=100, type=int, help='Validation standard for user and group names (for files output)')
 @click.option('--user-overrides', default=None, callback=get_param_dict, help='User overrides (JSON dictionary format)')
 @click.option('--group-overrides', default=None, callback=get_param_dict, help='Group overrides (JSON dictionary format)')
+@click.option('--dn-overrides', default=None, callback=get_param_dict, help='DN overrides (JSON dictionary format)')
 @click.option('--user-defaults', default=None, callback=get_param_dict, help='User defaults if attributes are missing (JSON dictionary format)')
 @click.option('--group-defaults', default=None, callback=get_param_dict, help='Group defaults if attributes are missing (JSON dictionary format)')
 def ldap2files(**args):
@@ -552,6 +582,7 @@ def ldap2files(**args):
     remove_group_attrs=remove_empty(args['remove_group_attrs'].split(','))
     user_overrides = args['user_overrides']
     group_overrides = args['group_overrides']
+    dn_overrides = args['dn_overrides']
     user_defaults = args['user_defaults']
     group_defaults = args['group_defaults']
 
@@ -705,6 +736,12 @@ def ldap2files(**args):
         if user_overrides:
             logging.info('Running override for users')
             all_users_data = override_values(all_users_data, user_overrides)
+
+        if dn_overrides:
+            logging.info('Running override for group DNs')
+            all_groups_data = override_dns(all_groups_data, dn_overrides)
+            logging.info('Running override for user DNs')
+            all_users_data = override_dns(all_users_data, dn_overrides)
 
         if len(remove_group_attrs) > 0:
             logging.info('Removing unwanted attributes for groups')
