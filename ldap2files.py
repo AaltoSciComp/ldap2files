@@ -289,6 +289,19 @@ def override_values(datadict, overrides, soft=False):
     return datadict
 
 
+def remove_attrs(datadict, removals):
+    """
+    Remove attrs in the LDAP entries.
+    """
+    for attr in removals:
+        logging.debug('Removing attributes with name: %s', attr)
+        for dn in datadict.keys():
+            if attr in datadict[dn]:
+                del datadict[dn][attr]
+    return datadict
+
+
+
 def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
     """
     Write group and user data as LDIF files.
@@ -483,6 +496,8 @@ def get_param_dict(ctx, param, value):
 @click.option('--group-base', required=True, help='Group search base')
 @click.option('--extra-user-attrs', default='', help='Extra user attributes')
 @click.option('--extra-group-attrs', default='', help='Extra group attributes to search')
+@click.option('--remove-user-attrs', default='', help='User attributes to remove')
+@click.option('--remove-group-attrs', default='', help='Group attributes to remove')
 @click.option('--auth-type', default='gssapi', type=click.Choice(("bind", "gssapi")), help='Authentication type')
 @click.option("--cert", default='/etc/ssl/certs/ca-certificates.crt', type=click.Path(exists=True, readable=True), help='Path to certificates')
 @click.option('--user', default=None, help='Username (only valid for bind auths)')
@@ -529,8 +544,12 @@ def ldap2files(**args):
     user_base=args['user_base']
     group_base=args['group_base']
 
-    extra_user_attrs=args['extra_user_attrs'].split(',')
-    extra_group_attrs=args['extra_group_attrs'].split(',')
+    remove_empty = lambda l: [s for s in l if s]
+
+    extra_user_attrs=remove_empty(args['extra_user_attrs'].split(','))
+    extra_group_attrs=remove_empty(args['extra_group_attrs'].split(','))
+    remove_user_attrs=remove_empty(args['remove_user_attrs'].split(','))
+    remove_group_attrs=remove_empty(args['remove_group_attrs'].split(','))
     user_overrides = args['user_overrides']
     group_overrides = args['group_overrides']
     user_defaults = args['user_defaults']
@@ -686,6 +705,14 @@ def ldap2files(**args):
         if user_overrides:
             logging.info('Running override for users')
             all_users_data = override_values(all_users_data, user_overrides)
+
+        if len(remove_group_attrs) > 0:
+            logging.info('Removing unwanted attributes for groups')
+            remove_attrs(all_groups_data, remove_group_attrs)
+
+        if len(remove_user_attrs) > 0:
+            logging.info('Removing unwanted attributes for users')
+            remove_attrs(all_users_data, remove_user_attrs)
 
         if output_format == 'ldif':
             write_ldif(output_prefix, all_users_data, all_groups_data, sorting=sort_ldif)
