@@ -101,6 +101,8 @@ Options:
   --group-base TEXT               Group search base  [required]
   --extra-user-attrs TEXT         Extra user attributes
   --extra-group-attrs TEXT        Extra group attributes to search
+  --remove-user-attrs TEXT        User attributes to remove
+  --remove-group-attrs TEXT       Group attributes to remove
   --auth-type [bind|gssapi]       Authentication type
   --cert PATH                     Path to certificates
   --user TEXT                     Username (only valid for bind auths)
@@ -139,6 +141,7 @@ Options:
                                   (for files output)
   --user-overrides TEXT           User overrides (JSON dictionary format)
   --group-overrides TEXT          Group overrides (JSON dictionary format)
+  --dn-overrides TEXT             DN overrides (JSON dictionary format)
   --user-defaults TEXT            User defaults if attributes are missing
                                   (JSON dictionary format)
   --group-defaults TEXT           Group defaults if attributes are missing
@@ -164,11 +167,33 @@ extra_group_attrs: ''
 user_overrides:
   unixHomeDirectory: "/home/{sAMAccountName}"
 group_overrides: {}
+dn_overrides:
+  "(?P<cn>CN=[^,]*).*,OU=users,.*": "{cn},OU=newusers,DC=org,DC=example,DC=com"
 ```
 
-`user_defaults`, `group_defaults`, `user_overrides` and `group_overrides`
-that expect dictionaries can be specified from the command line with JSON
-dictonary syntax.
+`user_defaults`, `group_defaults`, `user_overrides`, `group_overrides` and
+`dn_overrides` that expect dictionaries can be specified from the command line with JSON
+dictionary syntax.
+
+## Overriding attributes and DNs
+
+One can override various entries using the following dictionaries:
+
+- `user_defaults`: If key `key` is missing from the user data, set a default value of `value`.
+- `group_defaults`: Same as for users, but for groups.
+- `user_overrides`: Override `key` with value of `value`, where `value` is a
+  [Python format string](https://docs.python.org/3/library/string.html#formatstrings)
+  filled by the attributes dictionary. E.g. `"unixHomeDirectory: "/home/{sAMAccountName}"`
+  would fill attribute `unixHomeDirectory` based on the user's `sAMAccountName`.
+- `group_overrides`: Same as for users, but for groups.
+- `dn_overrides`: Rewrite DN (distinguished name) that describes the placement of the user/group.
+  The `key` should be a
+  [Python regular expression](https://docs.python.org/3/library/re.html#regular-expression-syntax)
+  with named capture groups. If the DN matches the regular expression it is replaced by `value`,
+  which is a Python format string filled by the capture dictionary of the regular expression.
+  E.g. `"(?P<cn>CN=[^,]*).*,OU=users,.*": "{cn},OU=newusers,DC=org,DC=example,DC=com"` would
+  move user `CN=username,OU=subgroup,OU=users,DC=org,DC=example,DC=org` to
+  `CN=username,OU=newusers,DC=org,DC=example,DC=org`.
 
 ## Running with machine keytab
 
