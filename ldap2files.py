@@ -279,21 +279,43 @@ def override_dns(datadict, overrides):
     values. Patterns should capture wanted values with (?P<name>...).
     """
 
-    datadict_formatted = {}
+    def override_dn(override_regex, dn):
+        match = re.match(override_regex, dn)
+        if match:
+            dn = override_fmt.format(**match.groupdict())
+        return dn
+
+    dn_entries = len(datadict)
+
+    logging.debug('Running overrides for %d entries', dn_entries)
 
     for override_regex, override_fmt in overrides.items():
-        logging.debug('Running override for DNs with regex %s and format %s', override_regex, override_fmt)
+        datadict_formatted = {}
+        logging.debug('Running overrides for DNs with regex %s and format %s', override_regex, override_fmt)
         for dn in datadict.keys():
             if isinstance(dn, bytes):
-                dn_new = dn.decode('utf-8')
-            match = re.match(override_regex, dn_new)
-            if match:
-                dn_new = override_fmt.format(**match.groupdict())
+                dn_decoded = dn.decode('utf-8')
+            else:
+                dn_decoded = dn
 
-            dn_new = dn_new.encode('utf-8')
-            assert dn_new not in datadict_formatted, \
+            dn_new = override_dn(override_regex, dn_decoded)
+
+            dn_new_encoded = dn_new.encode('utf-8')
+
+            assert dn_new_encoded not in datadict_formatted, \
                 f"Problem with DN override! DN {dn} matches another entry after override!"
-            datadict_formatted[dn_new] = datadict[dn]
+            datadict_formatted[dn_new_encoded] = datadict[dn]
+
+            # Run dn override for all attribute values as well
+            for attr in datadict_formatted[dn_new_encoded].keys():
+                values_decoded = [ x.decode('utf-8') for x in datadict_formatted[dn_new_encoded][attr] ]
+                values_new = [ bytes(override_dn(override_regex, x), encoding='utf-8') for x in values_decoded ]
+                datadict_formatted[dn_new_encoded][attr] = values_new
+
+        datadict = datadict_formatted
+
+    assert dn_entries == len(datadict_formatted), \
+        f"Number of DN entries {dn_entries} does not match after overrides!"
 
     return datadict_formatted
 
@@ -304,6 +326,7 @@ def override_values(datadict, overrides, soft=False):
 
     Format used is the python string formatting format for named values.
     """
+
     for attr, override_fmt in overrides.items():
         logging.debug('Running override for %s with format: %s', attr, override_fmt)
         for dn in datadict.keys():
@@ -313,7 +336,11 @@ def override_values(datadict, overrides, soft=False):
             for key,value in datadict[dn].items():
                 if len(value) == 1:
                     data_decoded[key] = value[0].decode('utf-8')
-            datadict[dn][attr] = [bytes(override_fmt.format(**data_decoded), encoding='utf-8')]
+            if isinstance(override_fmt, str):
+                datadict[dn][attr] = [ bytes(override_fmt.format(**data_decoded), encoding='utf-8') ]
+            elif isinstance(override_fmt, list):
+                datadict[dn][attr] = [ bytes(x.format(**data_decoded), encoding='utf-8') for x in override_fmt ]
+
     return datadict
 
 
@@ -335,6 +362,8 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
     Write group and user data as LDIF files.
     """
     userfile = f'{output_prefix}users.ldif'
+    if os.path.exists(userfile):
+        os.remove(userfile)
     with open(userfile, 'w', encoding='utf-8') as f:
         ldif_writer = ldif.LDIFWriter(f)
 
@@ -346,6 +375,8 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
             ldif_writer.unparse(dn, user_data)
 
     groupfile = f'{output_prefix}groups.ldif'
+    if os.path.exists(groupfile):
+        os.remove(groupfile)
     with open(groupfile, 'w', encoding='utf-8') as f:
         ldif_writer = ldif.LDIFWriter(f)
         for dn in sorted(group_datas):
