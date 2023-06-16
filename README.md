@@ -159,6 +159,8 @@ Example configuration file:
 ```yml
 groups: my_primary_group
 server: dc=org,dc=example,dc=com
+recursive_primary: True
+recursive_strategy: groupwise
 user_base: ou=users,ou=root,dc=org,dc=example,dc=com
 group_base: ou=groups,ou=root,dc=org,dc=example,dc=com
 cert: '/etc/ssl/certs/ca-certificates.crt'
@@ -168,7 +170,7 @@ user_overrides:
   unixHomeDirectory: "/home/{sAMAccountName}"
 group_overrides: {}
 dn_overrides:
-  "(?P<cn>CN=[^,]*).*,OU=users,.*": "{cn},OU=newusers,DC=org,DC=example,DC=com"
+  "CN=(?P<cn>[^,]*),.*,OU=users,.*": "CN={cn},OU=users,DC=org,DC=aalto,DC=fi"
 ```
 
 `user_defaults`, `group_defaults`, `user_overrides`, `group_overrides` and
