@@ -482,10 +482,13 @@ def get_unique_members(data, base=None):
     Get unique members of a data dictionary (keys are DN's)
     """
 
+    member_key = re.compile('^member(;range=(\d+)-(\d+))?$')
 
     member_dn_names = []
     for d in data.values():
-        member_dn_names.extend(d.get('member', {}))
+        for key, values in d.items():
+            if member_key.match(key):
+                member_dn_names.extend(d[key])
 
     if base:
         if isinstance(base, bytes):
