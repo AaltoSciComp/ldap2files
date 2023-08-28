@@ -344,6 +344,69 @@ def override_values(datadict, overrides, soft=False):
     return datadict
 
 
+def filter_values(datadict, filters):
+    """
+    Filter based on values in the LDAP entries.
+
+    Filters should be a dictionary with two dictionaries: include and exclude.
+
+    Each of these dictionaries should have the name of an LDAP value as the key and
+    pattern as the value. This pattern should be a valid Python regular
+    expression string.
+
+    For include filter, values that match the filter are included.
+    For exclude filter, values that match the filter are included.
+    """
+
+    dn_entries = len(datadict)
+
+    logging.debug('Running filters for %d entries', dn_entries)
+
+    # Include pass
+    if 'include' not in filters:
+        datadict_included = datadict.copy()
+    else:
+        datadict_included = {}
+        for f_value, f_fmt in filters['include'].items():
+            logging.debug('Running include filter for value %s and format %s', f_value, f_fmt)
+            f = re.compile(f_fmt)
+            for dn, data in datadict.items():
+                value = data.get(f_value, [''])[0]
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8').strip()
+                filter_match = f.search(value)
+                if filter_match:
+                    datadict_included[dn] = data
+
+    # Exclude pass
+    datadict_filtered = datadict_included.copy()
+    if 'exclude' in filters:
+        for f_value, f_fmt in filters['exclude'].items():
+            logging.debug('Running exclude filter for value %s and format %s', f_value, f_fmt)
+            f = re.compile(f_fmt)
+            for dn, data in datadict_included.items():
+                value = data.get(f_value, [''])[0]
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8').strip()
+                filter_match = f.search(value)
+                if filter_match:
+                    del datadict_filtered[dn]
+
+    dn_entries_filtered = len(datadict_filtered)
+
+    logging.debug('Filtered %d entries', dn_entries - dn_entries_filtered)
+
+    return datadict_filtered
+
+    # Include pass
+    datadict_filtered = filter_datadict(datadict, filters.get('include', {'cn': '.*'}), include=True)
+    datadict_filtered = filter_datadict(datadict_filtered, filters.get('exclude', {}), include=False)
+
+
+    return datadict_filtered
+
+
+
 def remove_attrs(datadict, removals):
     """
     Remove attrs in the LDAP entries.
@@ -584,6 +647,8 @@ def get_param_dict(ctx, param, value):
 @click.option('--user-overrides', default=None, callback=get_param_dict, help='User overrides (JSON dictionary format)')
 @click.option('--group-overrides', default=None, callback=get_param_dict, help='Group overrides (JSON dictionary format)')
 @click.option('--dn-overrides', default=None, callback=get_param_dict, help='DN overrides (JSON dictionary format)')
+@click.option('--user-filters', default=None, callback=get_param_dict, help='User filters (JSON dictionary format)')
+@click.option('--group-filters', default=None, callback=get_param_dict, help='Group filters (JSON dictionary format)')
 @click.option('--user-defaults', default=None, callback=get_param_dict, help='User defaults if attributes are missing (JSON dictionary format)')
 @click.option('--group-defaults', default=None, callback=get_param_dict, help='Group defaults if attributes are missing (JSON dictionary format)')
 def ldap2files(**args):
@@ -617,6 +682,10 @@ def ldap2files(**args):
     user_overrides = args['user_overrides']
     group_overrides = args['group_overrides']
     dn_overrides = args['dn_overrides']
+
+    user_filters = args['user_filters']
+    group_filters = args['group_filters']
+
     user_defaults = args['user_defaults']
     group_defaults = args['group_defaults']
 
@@ -764,12 +833,19 @@ def ldap2files(**args):
         if group_overrides:
             logging.info('Running override for groups')
             all_groups_data = override_values(all_groups_data, group_overrides)
+        if group_filters:
+            logging.info('Running filters for groups')
+            all_groups_data = filter_values(all_groups_data, group_filters)
+
         if user_defaults:
             logging.info('Running defaults for users')
             all_users_data = override_values(all_users_data, user_defaults, soft=True)
         if user_overrides:
             logging.info('Running override for users')
             all_users_data = override_values(all_users_data, user_overrides)
+        if user_filters:
+            logging.info('Running filters for users')
+            all_users_data = filter_values(all_users_data, user_filters)
 
         if dn_overrides:
             logging.info('Running override for group DNs')
