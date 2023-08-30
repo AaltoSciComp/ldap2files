@@ -450,6 +450,17 @@ def write_ldif(output_prefix, user_datas, group_datas, sorting=False):
             ldif_writer.unparse(dn, group_data)
 
 
+def get_all_members(group_data):
+    member_key = re.compile('^member(;range=(\d+)-(\d+))?$')
+
+    member_dn_names = []
+    for key, values in group_data.items():
+        if member_key.match(key):
+            member_dn_names.extend(values)
+
+    return member_dn_names
+
+
 def write_files(output_prefix, user_datas, group_datas, primary_user_gid=None, validation_standard='rhel'):
     """
     Write group and user data as Unix style files
@@ -510,7 +521,6 @@ def write_files(output_prefix, user_datas, group_datas, primary_user_gid=None, v
 
     group_format = '{groupname}:{password}:{gid}:{users}\n'
 
-
     with open(f'{output_prefix}group', 'w', encoding='utf-8') as f:
 
         for dn in sorted(group_datas):
@@ -519,7 +529,8 @@ def write_files(output_prefix, user_datas, group_datas, primary_user_gid=None, v
                 logging.debug('Group %s does not have an GID', dn)
                 continue
 
-            users = [ usernames[dn] for dn in group_data.get('member', []) if dn in usernames]
+            users = [ usernames[dn] for dn in get_all_members(group_data) if dn in usernames ]
+
             users = list(filter(validation_re.match, users))
 
             group = {
@@ -540,18 +551,15 @@ def write_files(output_prefix, user_datas, group_datas, primary_user_gid=None, v
 
             f.write(group_format.format(**group))
 
+
 def get_unique_members(data, base=None):
     """
     Get unique members of a data dictionary (keys are DN's)
     """
 
-    member_key = re.compile('^member(;range=(\d+)-(\d+))?$')
-
     member_dn_names = []
     for d in data.values():
-        for key, values in d.items():
-            if member_key.match(key):
-                member_dn_names.extend(d[key])
+        member_dn_names.extend(get_all_members(d))
 
     if base:
         if isinstance(base, bytes):
