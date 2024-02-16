@@ -13,6 +13,7 @@ from collections import defaultdict
 
 import click
 import ldap
+from ldap.controls.libldap import SimplePagedResultsControl
 import ldif
 
 import yaml
@@ -67,12 +68,15 @@ class LDAPSearcher:
 
         self.num_queries = 0
 
+        self.page_size = 500
+
     def __enter__(self):
         assert self.server is not None, "Server not set!"
         uri = f"ldap://{self.server}"
 
         logging.debug("Connecting to server via URI: %s", uri)
         ldap_con = ldap.initialize(uri)
+        ldap_con.set_option(ldap.OPT_REFERRALS, 0)
 
         if self.auth_type == "gssapi":
             logging.debug("Connecting using GSSAPI authentication.")
@@ -165,10 +169,36 @@ class LDAPSearcher:
                     base,
                     ldap_filter,
                 )
-                response = self.connection.search_s(
-                    base, ldap.SCOPE_SUBTREE, ldap_filter, attrs
+
+                # Paged queries implemented from here: https://stackoverflow.com/a/61829690
+
+                results_control = SimplePagedResultsControl(criticality=True, size=self.page_size, cookie='')
+
+                msgid = self.connection.search_ext(
+                    base, ldap.SCOPE_SUBTREE, ldap_filter, attrs, serverctrls=[results_control]
                 )
                 self.num_queries += 1
+
+                response = []
+
+                pages = 0
+                while True:
+                    pages += 1
+                    rtype, rdata, rmsgid, serverctrls = self.connection.result3(msgid)
+                    response.extend(rdata)
+
+                    pctrls = [c for c in serverctrls if c.controlType == SimplePagedResultsControl.controlType]
+                    if pctrls:
+                        if pctrls[0].cookie:
+                            results_control.cookie = pctrls[0].cookie
+                            msgid = self.connection.search_ext(
+                                base, ldap.SCOPE_SUBTREE, ldap_filter, attrs, serverctrls=[results_control]
+                            )
+                        else:
+                            break
+                    else:
+                        break
+                logging.debug("Parsed query from %d pages", pages)
 
                 for dn, dn_data in response:
                     if not isinstance(dn, bytes):
